@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Simple Image Viewer
+Name[de]=Einfacher Bildbetrachter
+GenericName=Image Viewer
+GenericName[de]=Bildbetrachter
+Comment=Fast, simple image viewer (JPEG, PNG, WebP, AVIF, HEIC, JPEG XL, ...)
+Comment[de]=Schneller, einfacher Bildbetrachter (JPEG, PNG, WebP, AVIF, HEIC, JPEG XL, ...)
+Exec=@BIN@ %f
+Icon=simple-image-viewer
+Terminal=false
+Categories=Graphics;Viewer;
+StartupWMClass=simple-image-viewer
+MimeType=image/jpeg;image/pjpeg;image/png;image/apng;image/gif;image/webp;image/avif;image/heic;image/heif;image/jxl;image/bmp;image/x-bmp;image/tiff;image/x-icon;image/vnd.microsoft.icon;image/x-tga;image/x-portable-anymap;image/x-portable-bitmap;image/x-portable-graymap;image/x-portable-pixmap;image/x-exr;image/vnd.radiance;image/x-dds;image/qoi;image/x-qoi;

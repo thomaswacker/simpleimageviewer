@@ -1,0 +1,25 @@
+[package]
+name = "simple-image-viewer"
+version = "0.1.0"
+edition = "2024"
+description = "Einfacher, schneller Bildbetrachter (JPEG, PNG, WebP, AVIF, HEIC, JPEG XL, ...)"
+
+[dependencies]
+eframe = "0.37.0"
+# Eingebauter AVIF-Encoder (ravif) wird nicht benötigt – AVIF wird über libheif dekodiert.
+image = { version = "0.25.10", default-features = false, features = [
+    "rayon", "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg",
+    "png", "pnm", "qoi", "tga", "tiff", "webp",
+] }
+jxl-oxide = { version = "0.12.6", features = ["image"] }
+libheif-rs = { version = "3.0.0", features = ["image"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Dekoder auch im Debug-Build optimieren, sonst sind große Bilder sehr langsam.
+[profile.dev.package."*"]
+opt-level = 3

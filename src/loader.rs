@@ -121,7 +121,7 @@ fn decode_animation(path: &Path) -> ImageResult<Option<Vec<(RgbaImage, Duration)
     Ok(if result.len() > 1 { Some(result) } else { None })
 }
 
-fn decode_still(path: &Path) -> ImageResult<DynamicImage> {
+pub fn decode_still(path: &Path) -> ImageResult<DynamicImage> {
     let mut reader = ImageReader::open(path)?.with_guessed_format()?;
     reader.no_limits();
 

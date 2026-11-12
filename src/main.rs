@@ -8,19 +8,22 @@
 //!   1                  ursprünglicher Zoom (100 % bzw. eingepasst)
 //!   Leertaste          Animation anhalten / fortsetzen
 //!   Linke Maustaste    Bild verschieben
+//!   Rechte Maustaste / Umschalt + linke Maustaste ziehen
+//!                      Bereich auswählen, Text erkennen (OCR) und in die Zwischenablage kopieren
 //!   F11 / F            Vollbild umschalten
-//!   Esc / Q            Beenden
+//!   Esc / Q            Beenden (bzw. OCR-Auswahl abbrechen)
 
 mod loader;
+mod ocr;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Color32, Event, Key, MouseWheelUnit, Pos2, Rect, Sense, TextureHandle, Vec2,
-    ViewportCommand, pos2, vec2,
+    self, Color32, Event, Key, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Stroke,
+    StrokeKind, TextureHandle, Vec2, ViewportCommand, pos2, vec2,
 };
 
 const APP_ID: &str = "simple-image-viewer";
@@ -29,6 +32,9 @@ const MIN_SCALE: f32 = 0.01;
 const MAX_SCALE: f32 = 64.0;
 /// Zoomfaktor pro Mausrad-Raste.
 const WHEEL_STEP: f32 = 1.2;
+/// Anzeigedauer von Hinweisen (z. B. "Text kopiert").
+const NOTICE_DURATION: Duration = Duration::from_secs(3);
+const SELECTION_COLOR: Color32 = Color32::from_rgb(0x3d, 0xae, 0xe9);
 
 fn main() -> eframe::Result {
     loader::register_decoders();
@@ -89,6 +95,12 @@ struct Viewer {
     anim_start: Instant,
     /// Animation angehalten (Leertaste): angezeigtes Einzelbild.
     paused_at: Option<Duration>,
+    /// OCR-Auswahl in Bildschirmkoordinaten (Startpunkt, aktueller Punkt).
+    selection: Option<(Pos2, Pos2)>,
+    /// Laufende Texterkennung.
+    ocr: Option<Receiver<Result<String, String>>>,
+    /// Kurzer Hinweis am unteren Fensterrand und Zeitpunkt seines Erscheinens.
+    notice: Option<(String, Instant)>,
 }
 
 impl Viewer {
@@ -107,6 +119,9 @@ impl Viewer {
             message: None,
             anim_start: Instant::now(),
             paused_at: None,
+            selection: None,
+            ocr: None,
+            notice: None,
         };
 
         match arg {
@@ -176,6 +191,7 @@ impl Viewer {
             return;
         }
         self.index = index;
+        self.selection = None;
         self.reset_view();
         self.restart_animation();
         self.request_around(ctx);
@@ -228,6 +244,65 @@ impl Viewer {
         }
     }
 
+    /// Startet die Texterkennung für einen Ausschnitt `[x, y, breite, höhe]` des aktuellen Bildes.
+    fn start_ocr(&mut self, ctx: &egui::Context, region: [u32; 4]) {
+        let Some(path) = self.current_path().cloned() else { return };
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(ocr::recognize(&path, region));
+            ctx.request_repaint();
+        });
+        self.ocr = Some(rx);
+    }
+
+    /// Übernimmt das Ergebnis der Texterkennung und kopiert den Text in die Zwischenablage.
+    fn receive_ocr(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.ocr else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("Texterkennung abgebrochen".into()),
+        };
+        self.ocr = None;
+        let notice = match result {
+            Ok(text) if text.is_empty() => "Kein Text erkannt".to_string(),
+            Ok(text) => {
+                let chars = text.chars().count();
+                let lines = text.lines().count();
+                ctx.copy_text(text);
+                let plural = if lines == 1 { "" } else { "n" };
+                format!("Text kopiert ({chars} Zeichen, {lines} Zeile{plural})")
+            }
+            Err(e) => format!("Texterkennung fehlgeschlagen: {e}"),
+        };
+        self.notice = Some((notice, Instant::now()));
+    }
+
+    /// Hinweis am unteren Fensterrand (OCR läuft bzw. Ergebnis).
+    fn draw_notice(&mut self, ctx: &egui::Context, painter: &egui::Painter, area: Rect) {
+        let text = if self.ocr.is_some() {
+            "Texterkennung läuft …".to_string()
+        } else {
+            let Some((text, since)) = &self.notice else { return };
+            let elapsed = since.elapsed();
+            if elapsed >= NOTICE_DURATION {
+                self.notice = None;
+                return;
+            }
+            ctx.request_repaint_after(NOTICE_DURATION - elapsed);
+            text.clone()
+        };
+        let font = egui::FontId::proportional(15.0);
+        let galley = painter.layout_no_wrap(text, font, Color32::from_gray(230));
+        let pad = vec2(14.0, 8.0);
+        let size = galley.size() + pad * 2.0;
+        let center = pos2(area.center().x, area.bottom() - 30.0 - size.y / 2.0);
+        let rect = Rect::from_center_size(center, size);
+        painter.rect_filled(rect, 6.0, Color32::from_black_alpha(200));
+        painter.galley(rect.min + pad, galley, Color32::WHITE);
+    }
+
     fn update_title(&mut self, ctx: &egui::Context, scale: Option<f32>) {
         let title = match self.current_path() {
             None => "Bildbetrachter".to_string(),
@@ -273,6 +348,7 @@ impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.receive_loaded(&ctx);
+        self.receive_ocr(&ctx);
 
         // --- Tastatur -------------------------------------------------------
         let (next, prev, first, last, reset, zoom_in, zoom_out, fullscreen, quit, pause) =
@@ -292,7 +368,9 @@ impl eframe::App for Viewer {
             });
 
         if quit {
-            if self.fullscreen {
+            if self.selection.is_some() {
+                self.selection = None;
+            } else if self.fullscreen {
                 self.fullscreen = false;
                 ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
             } else {
@@ -333,6 +411,7 @@ impl eframe::App for Viewer {
 
         let slot = self.current_path().and_then(|p| self.cache.get(p));
         let mut shown_scale = None;
+        let mut ocr_region = None;
 
         match slot {
             Some(Slot::Ready { frames, size }) => {
@@ -382,8 +461,21 @@ impl eframe::App for Viewer {
                     self.zoom = Some(scale);
                 }
 
-                // Verschieben mit der Maus.
-                if response.dragged() {
+                // Rechte Maustaste bzw. Umschalt + linke Maustaste ziehen: OCR-Bereich
+                // auswählen; sonst linke Maustaste ziehen: Bild verschieben.
+                let shift = ctx.input(|i| i.modifiers.shift);
+                if self.selection.is_none()
+                    && (response.drag_started_by(PointerButton::Secondary)
+                        || (shift && response.drag_started_by(PointerButton::Primary)))
+                    && let Some(origin) = ctx.input(|i| i.pointer.press_origin())
+                {
+                    self.selection = Some((origin, origin));
+                }
+                if let Some((_, end)) = &mut self.selection {
+                    if let Some(p) = response.interact_pointer_pos() {
+                        *end = p;
+                    }
+                } else if response.dragged_by(PointerButton::Primary) {
                     self.offset += response.drag_delta();
                 }
 
@@ -408,6 +500,27 @@ impl eframe::App for Viewer {
                     Color32::WHITE,
                 );
                 shown_scale = Some(scale);
+
+                if let Some((start, end)) = self.selection {
+                    let sel = Rect::from_two_pos(start, end).intersect(rect);
+                    if sel.is_positive() {
+                        painter.rect_filled(sel, 0.0, SELECTION_COLOR.gamma_multiply(0.2));
+                        let stroke = Stroke::new(1.0, SELECTION_COLOR);
+                        painter.rect_stroke(sel, 0.0, stroke, StrokeKind::Inside);
+                    }
+                    if response.drag_stopped() {
+                        self.selection = None;
+                        // Bildschirmpunkte in Bildpixel umrechnen.
+                        let min = (sel.min - rect.min) / scale * ppp;
+                        let size = sel.size() / scale * ppp;
+                        if sel.is_positive() && size.x >= 4.0 && size.y >= 4.0 && self.ocr.is_none()
+                        {
+                            let [x, y] = [min.x, min.y].map(|v| v.round().max(0.0) as u32);
+                            let [w, h] = [size.x, size.y].map(|v| v.round() as u32);
+                            ocr_region = Some([x, y, w, h]);
+                        }
+                    }
+                }
             }
             Some(Slot::Failed(err)) => {
                 let name = self
@@ -443,6 +556,13 @@ impl eframe::App for Viewer {
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(self.fullscreen));
         }
 
+        if !matches!(slot, Some(Slot::Ready { .. })) {
+            self.selection = None;
+        }
+        if let Some(region) = ocr_region {
+            self.start_ocr(&ctx, region);
+        }
+        self.draw_notice(&ctx, &painter, area);
         self.update_title(&ctx, shown_scale);
     }
 }
